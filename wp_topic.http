@@ -1,0 +1,6 @@
+@wp_topic_HostAddress = http://localhost:5293
+
+GET {{wp_topic_HostAddress}}/weatherforecast/
+Accept: application/json
+
+###
