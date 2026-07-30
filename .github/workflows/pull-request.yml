@@ -1,0 +1,117 @@
+name: Pull request
+
+on:
+  pull_request:
+    branches: [main]
+
+permissions:
+  id-token: write
+  contents: read
+
+jobs:
+  code:
+    name: Build and test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '10.0.x'
+
+      - run: dotnet restore
+      - run: dotnet build --configuration Release --no-restore
+      - run: dotnet test --configuration Release --no-build --logger trx
+
+      # Catches a broken Dockerfile before it reaches ACR Tasks.
+      - name: Build container image
+        run: docker build -t wordsearch-api:pr .
+
+  infrastructure:
+    name: Validate infrastructure
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # A malformed template otherwise fails halfway through a deployment,
+      # after the workspace exists and before the app does.
+      - name: Check template syntax
+        run: |
+          jq -e . infra/azuredeploy.json > /dev/null
+          jq -e . infra/azuredeploy.parameters.prod.json > /dev/null
+
+      # Every parameter the parameters file does not set must be supplied on
+      # the command line by deploy.yml. This catches the mismatch here rather
+      # than at deploy time.
+      - name: Check every parameter is accounted for
+        run: |
+          REQUIRED=$(jq -r '.parameters | to_entries[]
+            | select(.value.defaultValue == null) | .key' infra/azuredeploy.json | sort)
+          IN_FILE=$(jq -r '.parameters | keys[]' infra/azuredeploy.parameters.prod.json | sort)
+          IN_WORKFLOW=$(grep -oP '^\s+\K[a-zA-Z]+(?==")' .github/workflows/deploy.yml | sort -u)
+          MISSING=$(comm -23 <(echo "$REQUIRED") <(printf '%s\n%s\n' "$IN_FILE" "$IN_WORKFLOW" | sort -u))
+          if [ -n "$MISSING" ]; then
+            echo "::error::Parameters with no value anywhere: $MISSING"
+            exit 1
+          fi
+          echo "All required parameters have a source."
+
+      # Forked pull requests get no OIDC token for your tenant, so the Azure
+      # steps below are skipped for them.
+      - name: Sign in to Azure
+        if: github.event.pull_request.head.repo.full_name == github.repository
+        uses: azure/login@v2
+        with:
+          client-id: ${{ vars.AZURE_CLIENT_ID }}
+          tenant-id: ${{ vars.AZURE_TENANT_ID }}
+          subscription-id: ${{ vars.AZURE_SUBSCRIPTION_ID }}
+
+      - name: Read bootstrap outputs
+        id: context
+        if: github.event.pull_request.head.repo.full_name == github.repository
+        run: |
+          IDENTITY=$(az identity show \
+            --name id-wordsearch-app \
+            --resource-group "${{ vars.AZURE_RESOURCE_GROUP }}" \
+            --query '{id:id,clientId:clientId}' -o json)
+          echo "identity_id=$(echo "$IDENTITY" | jq -r .id)" >> "$GITHUB_OUTPUT"
+          echo "identity_client_id=$(echo "$IDENTITY" | jq -r .clientId)" >> "$GITHUB_OUTPUT"
+          echo "registry_server=$(az acr show \
+            --name '${{ vars.AZURE_REGISTRY_NAME }}' \
+            --query loginServer -o tsv)" >> "$GITHUB_OUTPUT"
+
+      # ARM validates the template against the live resource group: wrong
+      # api versions, bad property names, and unresolvable references all
+      # surface here.
+      - name: Validate against Azure
+        if: github.event.pull_request.head.repo.full_name == github.repository
+        run: |
+          az deployment group validate \
+            --resource-group "${{ vars.AZURE_RESOURCE_GROUP }}" \
+            --template-file infra/azuredeploy.json \
+            --parameters @infra/azuredeploy.parameters.prod.json \
+            --parameters \
+              containerImage="${{ steps.context.outputs.registry_server }}/wordsearch-api:validate" \
+              registryServer="${{ steps.context.outputs.registry_server }}" \
+              appIdentityResourceId="${{ steps.context.outputs.identity_id }}" \
+              appIdentityClientId="${{ steps.context.outputs.identity_client_id }}" \
+              keyVaultName=kv-wordsearch-prod \
+              azureOpenAIEndpoint="${{ vars.AZURE_OPENAI_ENDPOINT }}" \
+            --output none
+
+      # Shows the reviewer exactly which Azure resources this PR would change.
+      - name: What-if
+        if: github.event.pull_request.head.repo.full_name == github.repository
+        run: |
+          az deployment group what-if \
+            --resource-group "${{ vars.AZURE_RESOURCE_GROUP }}" \
+            --template-file infra/azuredeploy.json \
+            --parameters @infra/azuredeploy.parameters.prod.json \
+            --parameters \
+              containerImage="${{ steps.context.outputs.registry_server }}/wordsearch-api:whatif" \
+              registryServer="${{ steps.context.outputs.registry_server }}" \
+              appIdentityResourceId="${{ steps.context.outputs.identity_id }}" \
+              appIdentityClientId="${{ steps.context.outputs.identity_client_id }}" \
+              keyVaultName=kv-wordsearch-prod \
+              azureOpenAIEndpoint="${{ vars.AZURE_OPENAI_ENDPOINT }}" \
+            --exclude-change-types Ignore NoChange
