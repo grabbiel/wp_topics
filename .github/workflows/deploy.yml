@@ -39,6 +39,9 @@ jobs:
           client-id: ${{ vars.AZURE_CLIENT_ID }}
           tenant-id: ${{ vars.AZURE_TENANT_ID }}
           subscription-id: ${{ vars.AZURE_SUBSCRIPTION_ID }}
+      
+      - name: Install Container Apps extension
+        run: az extension add --name containerapp --upgrade --yes
 
       # ACR Tasks builds server side, so the runner needs neither Docker
       # credentials nor a registry password. The tag is the commit sha:
@@ -79,6 +82,9 @@ jobs:
           client-id: ${{ vars.AZURE_CLIENT_ID }}
           tenant-id: ${{ vars.AZURE_TENANT_ID }}
           subscription-id: ${{ vars.AZURE_SUBSCRIPTION_ID }}
+
+      - name: Install Container Apps extension
+        run: az extension add --name containerapp --upgrade --yes
 
       - name: Read bootstrap outputs
         id: context

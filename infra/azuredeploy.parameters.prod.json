@@ -9,7 +9,7 @@
       "value": "wordsearch"
     },
     "azureOpenAIDeployment": {
-      "value": "gpt-4o-mini"
+      "value": "wordsearch-chat"
     },
     "androidPackageName": {
       "value": "com.example.wordsearch"
