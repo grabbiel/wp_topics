@@ -1,0 +1,323 @@
+{
+  "$schema": "https://schema.management.azure.com/schemas/2019-04-01/deploymentTemplate.json#",
+  "contentVersion": "1.0.0.0",
+  "metadata": {
+    "description": "Everything the pipeline redeploys on every push. The registry, key vault and identities are created once by scripts/bootstrap.sh and referenced here, so this template needs no privileged permissions of its own."
+  },
+  "parameters": {
+    "location": {
+      "type": "string",
+      "defaultValue": "[resourceGroup().location]",
+      "metadata": {
+        "description": "Azure region for the workspace and Container Apps environment."
+      }
+    },
+    "namePrefix": {
+      "type": "string",
+      "defaultValue": "wordsearch",
+      "metadata": {
+        "description": "Short name used to build resource names."
+      }
+    },
+    "environmentName": {
+      "type": "string",
+      "defaultValue": "prod",
+      "allowedValues": [ "dev", "prod" ],
+      "metadata": {
+        "description": "Environment name, used as a suffix and as the ASP.NET Core environment."
+      }
+    },
+    "containerImage": {
+      "type": "string",
+      "metadata": {
+        "description": "Fully qualified image reference, including the digest or tag."
+      }
+    },
+    "registryServer": {
+      "type": "string",
+      "metadata": {
+        "description": "Login server of the registry holding the image."
+      }
+    },
+    "appIdentityResourceId": {
+      "type": "string",
+      "metadata": {
+        "description": "Resource id of the user-assigned identity the app runs as."
+      }
+    },
+    "appIdentityClientId": {
+      "type": "string",
+      "metadata": {
+        "description": "Client id of that identity. DefaultAzureCredential needs it to pick the right one."
+      }
+    },
+    "keyVaultName": {
+      "type": "string",
+      "metadata": {
+        "description": "Name of the key vault holding the app secrets."
+      }
+    },
+    "azureOpenAIEndpoint": {
+      "type": "string",
+      "metadata": {
+        "description": "Azure OpenAI endpoint, for example https://my-aoai.openai.azure.com"
+      }
+    },
+    "azureOpenAIDeployment": {
+      "type": "string",
+      "metadata": {
+        "description": "Azure OpenAI chat deployment name."
+      }
+    },
+    "androidPackageName": {
+      "type": "string",
+      "metadata": {
+        "description": "Android package name the Play Integrity token must be minted for."
+      }
+    },
+    "appleTeamId": {
+      "type": "string",
+      "metadata": {
+        "description": "Apple Developer team id."
+      }
+    },
+    "appleBundleId": {
+      "type": "string",
+      "metadata": {
+        "description": "iOS bundle identifier."
+      }
+    },
+    "minReplicas": {
+      "type": "int",
+      "defaultValue": 1,
+      "minValue": 0,
+      "maxValue": 30,
+      "metadata": {
+        "description": "Minimum replica count. The API keeps challenges and registered App Attest keys in memory, so a second replica rejects clients that got their challenge from the first one. Leave both bounds at 1 until those move to Redis."
+      }
+    },
+    "maxReplicas": {
+      "type": "int",
+      "defaultValue": 1,
+      "minValue": 1,
+      "maxValue": 30,
+      "metadata": {
+        "description": "Maximum replica count. See minReplicas before raising this."
+      }
+    },
+    "logRetentionInDays": {
+      "type": "int",
+      "defaultValue": 30,
+      "minValue": 7,
+      "maxValue": 730,
+      "metadata": {
+        "description": "How long Log Analytics keeps the container logs."
+      }
+    }
+  },
+  "variables": {
+    "workspaceName": "[format('log-{0}-{1}', parameters('namePrefix'), parameters('environmentName'))]",
+    "containerAppEnvironmentName": "[format('cae-{0}-{1}', parameters('namePrefix'), parameters('environmentName'))]",
+    "containerAppName": "[format('ca-{0}-api-{1}', parameters('namePrefix'), parameters('environmentName'))]",
+    "workspaceResourceId": "[resourceId('Microsoft.OperationalInsights/workspaces', variables('workspaceName'))]",
+    "containerAppEnvironmentResourceId": "[resourceId('Microsoft.App/managedEnvironments', variables('containerAppEnvironmentName'))]",
+    "keyVaultUri": "[format('https://{0}{1}/', parameters('keyVaultName'), environment().suffixes.keyvaultDns)]",
+    "aspNetCoreEnvironment": "[if(equals(parameters('environmentName'), 'prod'), 'Production', 'Staging')]",
+    "allowAppAttestDevelopment": "[if(equals(parameters('environmentName'), 'prod'), 'false', 'true')]"
+  },
+  "resources": [
+    {
+      "type": "Microsoft.OperationalInsights/workspaces",
+      "apiVersion": "2023-09-01",
+      "name": "[variables('workspaceName')]",
+      "location": "[parameters('location')]",
+      "properties": {
+        "sku": {
+          "name": "PerGB2018"
+        },
+        "retentionInDays": "[parameters('logRetentionInDays')]"
+      }
+    },
+    {
+      "type": "Microsoft.App/managedEnvironments",
+      "apiVersion": "2024-03-01",
+      "name": "[variables('containerAppEnvironmentName')]",
+      "location": "[parameters('location')]",
+      "dependsOn": [
+        "[variables('workspaceResourceId')]"
+      ],
+      "properties": {
+        "appLogsConfiguration": {
+          "destination": "log-analytics",
+          "logAnalyticsConfiguration": {
+            "customerId": "[reference(variables('workspaceResourceId'), '2023-09-01').customerId]",
+            "sharedKey": "[listKeys(variables('workspaceResourceId'), '2023-09-01').primarySharedKey]"
+          }
+        }
+      }
+    },
+    {
+      "type": "Microsoft.App/containerApps",
+      "apiVersion": "2024-03-01",
+      "name": "[variables('containerAppName')]",
+      "location": "[parameters('location')]",
+      "dependsOn": [
+        "[variables('containerAppEnvironmentResourceId')]"
+      ],
+      "identity": {
+        "type": "UserAssigned",
+        "userAssignedIdentities": {
+          "[parameters('appIdentityResourceId')]": {}
+        }
+      },
+      "properties": {
+        "managedEnvironmentId": "[variables('containerAppEnvironmentResourceId')]",
+        "configuration": {
+          "activeRevisionsMode": "Single",
+          "ingress": {
+            "external": true,
+            "targetPort": 8080,
+            "transport": "auto",
+            "allowInsecure": false,
+            "traffic": [
+              {
+                "latestRevision": true,
+                "weight": 100
+              }
+            ]
+          },
+          "registries": [
+            {
+              "server": "[parameters('registryServer')]",
+              "identity": "[parameters('appIdentityResourceId')]"
+            }
+          ],
+          "secrets": [
+            {
+              "name": "play-integrity-service-account",
+              "keyVaultUrl": "[format('{0}secrets/play-integrity-service-account', variables('keyVaultUri'))]",
+              "identity": "[parameters('appIdentityResourceId')]"
+            },
+            {
+              "name": "apple-appattest-root-pem",
+              "keyVaultUrl": "[format('{0}secrets/apple-appattest-root-pem', variables('keyVaultUri'))]",
+              "identity": "[parameters('appIdentityResourceId')]"
+            }
+          ]
+        },
+        "template": {
+          "containers": [
+            {
+              "name": "api",
+              "image": "[parameters('containerImage')]",
+              "resources": {
+                "cpu": 0.5,
+                "memory": "1Gi"
+              },
+              "env": [
+                {
+                  "name": "ASPNETCORE_ENVIRONMENT",
+                  "value": "[variables('aspNetCoreEnvironment')]"
+                },
+                {
+                  "name": "AZURE_CLIENT_ID",
+                  "value": "[parameters('appIdentityClientId')]"
+                },
+                {
+                  "name": "AzureOpenAI__Endpoint",
+                  "value": "[parameters('azureOpenAIEndpoint')]"
+                },
+                {
+                  "name": "AzureOpenAI__DeploymentName",
+                  "value": "[parameters('azureOpenAIDeployment')]"
+                },
+                {
+                  "name": "PlayIntegrity__PackageName",
+                  "value": "[parameters('androidPackageName')]"
+                },
+                {
+                  "name": "PlayIntegrity__ServiceAccountJson",
+                  "secretRef": "play-integrity-service-account"
+                },
+                {
+                  "name": "AppAttest__TeamId",
+                  "value": "[parameters('appleTeamId')]"
+                },
+                {
+                  "name": "AppAttest__BundleId",
+                  "value": "[parameters('appleBundleId')]"
+                },
+                {
+                  "name": "AppAttest__RootCertificatePem",
+                  "secretRef": "apple-appattest-root-pem"
+                },
+                {
+                  "name": "AppAttest__AllowDevelopmentEnvironment",
+                  "value": "[variables('allowAppAttestDevelopment')]"
+                }
+              ],
+              "probes": [
+                {
+                  "type": "Liveness",
+                  "httpGet": {
+                    "path": "/healthz",
+                    "port": 8080
+                  },
+                  "initialDelaySeconds": 5,
+                  "periodSeconds": 30
+                },
+                {
+                  "type": "Readiness",
+                  "httpGet": {
+                    "path": "/readyz",
+                    "port": 8080
+                  },
+                  "initialDelaySeconds": 3,
+                  "periodSeconds": 10,
+                  "failureThreshold": 3
+                }
+              ]
+            }
+          ],
+          "scale": {
+            "minReplicas": "[parameters('minReplicas')]",
+            "maxReplicas": "[parameters('maxReplicas')]",
+            "rules": [
+              {
+                "name": "http-concurrency",
+                "http": {
+                  "metadata": {
+                    "concurrentRequests": "50"
+                  }
+                }
+              }
+            ]
+          }
+        }
+      }
+    }
+  ],
+  "outputs": {
+    "apiFqdn": {
+      "type": "string",
+      "metadata": {
+        "description": "Public hostname of the API."
+      },
+      "value": "[reference(resourceId('Microsoft.App/containerApps', variables('containerAppName')), '2024-03-01').configuration.ingress.fqdn]"
+    },
+    "latestRevisionName": {
+      "type": "string",
+      "metadata": {
+        "description": "Name of the revision this deployment produced."
+      },
+      "value": "[reference(resourceId('Microsoft.App/containerApps', variables('containerAppName')), '2024-03-01').latestRevisionName]"
+    },
+    "containerAppName": {
+      "type": "string",
+      "metadata": {
+        "description": "Resource name of the container app, so the workflow does not have to rebuild it."
+      },
+      "value": "[variables('containerAppName')]"
+    }
+  }
+}
