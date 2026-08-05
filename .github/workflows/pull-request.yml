@@ -19,9 +19,12 @@ jobs:
         with:
           dotnet-version: '10.0.x'
 
-      - run: dotnet restore
-      - run: dotnet build --configuration Release --no-restore
-      - run: dotnet test --configuration Release --no-build --logger trx
+      # The solution must be named. The repository root holds both
+      # WordSearch.slnx and WordSearch.Api.csproj, and MSBuild errors with
+      # MSB1011 rather than picking one when a directory contains both.
+      - run: dotnet restore WordSearch.slnx
+      - run: dotnet build WordSearch.slnx --configuration Release --no-restore
+      - run: dotnet test WordSearch.slnx --configuration Release --no-build --logger trx
 
       # Catches a broken Dockerfile before it reaches ACR Tasks.
       - name: Build container image

@@ -1,0 +1,21 @@
+# bin/ and obj/ hold absolute paths from the machine that built them. Copying
+# them into the image produces restore and build failures that look nothing
+# like their cause. CI never sees them because .gitignore excludes them from
+# the clone; a local `docker build` would, without this file.
+**/bin/
+**/obj/
+
+**/.vs/
+**/.vscode/
+**/*.user
+
+.git/
+.github/
+.gitignore
+.dockerignore
+
+infra/
+scripts/
+README.md
+*.http
+appsettings.Development.json
